@@ -1,21 +1,4 @@
-# Echo-Vision: Pi 5 face detection + identification module
-# Install with: pip install -r requirements.txt --break-system-packages
-#
-# Note (Pi 5 / ARM64): torch/torchvision wheels for ARM can be slow to build
-# from source. If plain pip install is too slow, use the piwheels index:
-#   pip install -r requirements.txt --break-system-packages \
-#       --extra-index-url https://www.piwheels.org/simple
-
-facenet-pytorch==2.5.3
-torch>=2.0
-torchvision>=0.15
-opencv-python>=4.8
-numpy>=1.24
-flask>=3.0
-
-# CSI ribbon-cable camera support (Raspberry Pi OS Bookworm / libcamera).
-# Usually already installed system-wide via: sudo apt install -y python3-picamera2
-# If you're using a venv, create it with --system-site-packages so it can
-# see the system picamera2 install (it depends on libcamera which isn't
-# pip-installable in the normal way).
-# picamera2
+Flask>=3.0.0
+opencv-python>=4.8.0
+numpy>=1.24.0
+requests>=2.28.0
