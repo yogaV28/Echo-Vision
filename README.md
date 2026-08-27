@@ -1,5 +1,5 @@
 <div align="center">
-  <img src="[https://img.icons8.com/fluency/96/000000/artificial-intelligence.png](https://img.icons8.com/fluency/96/000000/artificial-intelligence.png)" alt="Echo-Vision Icon" width="100"/>
+  <img src="icon.png" alt="Echo-Vision Icon" width="100"/>
   <h1>👁️ Echo-Vision</h1>
   <p><strong>Advanced Local AI Assistant & 3D Spatial Awareness System</strong></p>
 </div>
