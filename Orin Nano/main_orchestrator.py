@@ -33,15 +33,22 @@ DEPTH_STREAM_URL = f"{PI5_BASE_URL}/video_feed/depth"
 # ----------------------------------------------------
 # Configuration
 # ----------------------------------------------------
-SYSTEM_LANGUAGE = "en"        # "en" for English, "ta" for Tamil
+SYSTEM_LANGUAGE = "ta"        # Set to 'ta' if you want primary focus on Tamil
 WAKE_WORD = "john"
-UNKNOWN_DELAY_SECONDS = 90    # 1.5 minutes wait before unknown registration
-KNOWN_COOLDOWN_SECONDS = 300  # 5 minutes cooldown before re-greeting
+UNKNOWN_DELAY_SECONDS = 90
+KNOWN_COOLDOWN_SECONDS = 300
 
 # 3D Depth Thresholds (in cm)
-OBSTACLE_WARN_CM = 20         # Warning threshold
-OBSTACLE_CRITICAL_CM = 10     # Critical stop threshold
-OBSTACLE_COOLDOWN_SEC = 2.5   # Delay between consecutive obstacle alerts
+OBSTACLE_WARN_CM = 20
+OBSTACLE_CRITICAL_CM = 10
+OBSTACLE_COOLDOWN_SEC = 2.5
+
+# ----------------------------------------------------
+# Tamil Learning Memory Setup
+# ----------------------------------------------------
+TAMIL_MEMORY_DIR = os.path.join(os.path.dirname(__file__), "tamil_learning_memory")
+os.makedirs(TAMIL_MEMORY_DIR, exist_ok=True)
+TAMIL_LOG_FILE = os.path.join(TAMIL_MEMORY_DIR, "tamil_interactions_log.txt")
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 
@@ -52,6 +59,33 @@ mic_pause_event = threading.Event()
 pending_id_lock = threading.Lock()
 current_pending_id = None
 last_obstacle_alert_time = 0
+
+# --- TAMIL LEARNING FUNCTIONS ---
+def is_tamil(text):
+    """Detects if the text contains Tamil Unicode characters."""
+    return any('\u0b80' <= char <= '\u0bff' for char in text)
+
+def save_to_tamil_memory(user_text, ai_response):
+    """Saves the interaction to the local learning directory."""
+    try:
+        with open(TAMIL_LOG_FILE, "a", encoding="utf-8") as f:
+            f.write(f"User: {user_text}\nJohn: {ai_response}\n---\n")
+    except Exception as e:
+        logging.error(f"[Learning Engine] Failed to save memory: {e}")
+
+def get_recent_tamil_memory(limit=3):
+    """Retrieves the last few interactions to inject as learning context."""
+    if not os.path.exists(TAMIL_LOG_FILE):
+        return ""
+    try:
+        with open(TAMIL_LOG_FILE, "r", encoding="utf-8") as f:
+            content = f.read().strip().split("---\n")
+            # Get the most recent valid interactions based on the limit
+            recent = [block.strip() for block in content if block.strip()][-limit:]
+            return "\n".join(recent)
+    except Exception:
+        return ""
+# --------------------------------
 
 
 def speech_playback_worker(voice_interface):
@@ -74,7 +108,6 @@ def speech_playback_worker(voice_interface):
         if interrupt_event.is_set() and speak_queue.empty():
             interrupt_event.clear()
 
-
 def force_immediate_interrupt():
     """Immediately stops AI speech playback and flushes the queue."""
     if not interrupt_event.is_set():
@@ -87,12 +120,8 @@ def force_immediate_interrupt():
             except queue.Empty:
                 break
 
-
 def depth_vision_worker(voice):
-    """
-    Background Thread: Processes the 3D Vision depth stream from the Pi 5.
-    Calculates distances in Left, Center, and Right zones and generates navigation commands.
-    """
+    """Background Thread: Processes the 3D Vision depth stream for obstacle avoidance."""
     global last_obstacle_alert_time
     logging.info("[3D Vision Engine] Connecting to depth video feed...")
     
@@ -106,29 +135,22 @@ def depth_vision_worker(voice):
             continue
 
         try:
-            # Convert depth frame to single channel if received as BGR
             if len(frame.shape) == 3:
                 depth_map = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
             else:
                 depth_map = frame
 
             h, w = depth_map.shape
-            
-            # Divide FOV into 3 sectors: Left, Center, Right
             left_zone = depth_map[:, :w // 3]
             center_zone = depth_map[:, w // 3: 2 * (w // 3)]
             right_zone = depth_map[:, 2 * (w // 3):]
 
-            # Estimate distances in cm (scaled from depth intensities 0-255 -> 0-200cm range)
             def get_zone_distance(zone):
                 valid_pixels = zone[zone > 10]
                 if len(valid_pixels) == 0:
                     return 999.0
-                # Higher brightness = closer object in typical normalized depth feeds
                 closest_val = np.percentile(valid_pixels, 95)
-                # Map 0-255 scale to ~ 0-200 cm
-                dist_cm = max(5.0, (255.0 - closest_val) * (200.0 / 255.0))
-                return dist_cm
+                return max(5.0, (255.0 - closest_val) * (200.0 / 255.0))
 
             d_left = get_zone_distance(left_zone)
             d_center = get_zone_distance(center_zone)
@@ -137,51 +159,33 @@ def depth_vision_worker(voice):
             min_dist = min(d_left, d_center, d_right)
             now = time.time()
 
-            # --- OBSTACLE DETECTION & DIRECTIONAL GUIDANCE ---
             if min_dist <= OBSTACLE_WARN_CM and (now - last_obstacle_alert_time > OBSTACLE_COOLDOWN_SEC):
                 last_obstacle_alert_time = now
                 force_immediate_interrupt()
                 interrupt_event.clear()
 
-                # 1. Critical Hazard (<= 10 cm)
                 if min_dist <= OBSTACLE_CRITICAL_CM:
-                    if SYSTEM_LANGUAGE == "en":
-                        warn_text = f"Warning! Obstacle at {int(min_dist)} centimeters! Stop immediately and step back."
-                    else:
-                        warn_text = f"எச்சரிக்கை! {int(min_dist)} சென்டிமீட்டரில் தடை! உடனே நின்று பின்வாங்கவும்."
-                
-                # 2. Navigation Guidance (10 cm to 20 cm)
+                    warn_text = f"எச்சரிக்கை! {int(min_dist)} சென்டிமீட்டரில் தடை! உடனே நின்று பின்வாங்கவும்." if SYSTEM_LANGUAGE == "ta" else f"Warning! Obstacle at {int(min_dist)} cm! Stop immediately."
                 else:
                     if d_center <= OBSTACLE_WARN_CM:
-                        if d_left > d_right and d_left > OBSTACLE_WARN_CM:
-                            direction = "Move left." if SYSTEM_LANGUAGE == "en" else "இடது பக்கம் நகரவும்."
-                        elif d_right > OBSTACLE_WARN_CM:
-                            direction = "Move right." if SYSTEM_LANGUAGE == "en" else "வலது பக்கம் நகரவும்."
-                        else:
-                            direction = "Step back." if SYSTEM_LANGUAGE == "en" else "பின்வாங்கவும்."
-                        
-                        if SYSTEM_LANGUAGE == "en":
-                            warn_text = f"Obstacle ahead at {int(d_center)} centimeters. {direction}"
-                        else:
-                            warn_text = f"முன்னால் {int(d_center)} செமீ தூரத்தில் தடை. {direction}"
-                    
+                        direction = "இடது பக்கம் நகரவும்." if (d_left > d_right and d_left > OBSTACLE_WARN_CM) else "வலது பக்கம் நகரவும்." if d_right > OBSTACLE_WARN_CM else "பின்வாங்கவும்."
+                        direction_en = "Move left." if (d_left > d_right and d_left > OBSTACLE_WARN_CM) else "Move right." if d_right > OBSTACLE_WARN_CM else "Step back."
+                        warn_text = f"முன்னால் {int(d_center)} செமீ தூரத்தில் தடை. {direction}" if SYSTEM_LANGUAGE == "ta" else f"Obstacle ahead at {int(d_center)} cm. {direction_en}"
                     elif d_left <= OBSTACLE_WARN_CM:
-                        warn_text = "Obstacle on your left. Move right." if SYSTEM_LANGUAGE == "en" else "இடதுபுறம் தடை. வலது பக்கம் நகரவும்."
-                    
-                    else: # d_right <= OBSTACLE_WARN_CM
-                        warn_text = "Obstacle on your right. Move left." if SYSTEM_LANGUAGE == "en" else "வலதுபுறம் தடை. இடது பக்கம் நகரவும்."
+                        warn_text = "இடதுபுறம் தடை. வலது பக்கம் நகரவும்." if SYSTEM_LANGUAGE == "ta" else "Obstacle on left. Move right."
+                    else:
+                        warn_text = "வலதுபுறம் தடை. இடது பக்கம் நகரவும்." if SYSTEM_LANGUAGE == "ta" else "Obstacle on right. Move left."
 
                 logging.warning(f"[3D Vision Alert] {warn_text}")
                 speak_queue.put(warn_text)
 
         except Exception as e:
             logging.error(f"[3D Vision Error] Frame analysis error: {e}")
-
-        time.sleep(0.08)  # ~12 FPS depth monitoring rate
+        time.sleep(0.08)
 
 
 def always_on_microphone_worker(voice, brain):
-    """Background Thread: Continuous Gemini Live voice interaction."""
+    """Background Thread: Continuous Gemini Live voice interaction with Tamil Memory Injection."""
     logging.info("[Thread-Mic] Always-On Microphone Capture Active.")
     
     while True:
@@ -198,14 +202,36 @@ def always_on_microphone_worker(voice, brain):
             clean_prompt = ambient_audio.lower().replace(WAKE_WORD, "").strip()
             if clean_prompt:
                 logging.info(f"[User Query]: {clean_prompt}")
+                
+                # --- LEARNING INJECTION ---
+                is_tamil_prompt = is_tamil(clean_prompt)
+                full_prompt = clean_prompt
+                
+                if is_tamil_prompt:
+                    recent_memory = get_recent_tamil_memory(limit=2)
+                    if recent_memory:
+                        # Feed the memory to the LLM so it "remembers" the context
+                        full_prompt = f"Previous Context:\n{recent_memory}\n\nUser now says: {clean_prompt}"
+                        logging.info("[Learning Engine] Injected recent Tamil memory into LLM context.")
+
                 try:
-                    for chunk in brain.generate_narration_stream(clean_prompt):
+                    full_response = ""
+                    for chunk in brain.generate_narration_stream(full_prompt):
                         if interrupt_event.is_set():
                             break
                         speak_queue.put(chunk)
+                        full_response += chunk + " "
+                    
+                    # --- SAVE NEW MEMORY ---
+                    if is_tamil_prompt and full_response:
+                        save_to_tamil_memory(clean_prompt, full_response.strip())
+                        
                 except AttributeError:
-                    reply = brain.generate_narration(clean_prompt)
+                    reply = brain.generate_narration(full_prompt)
                     speak_queue.put(reply)
+                    
+                    if is_tamil_prompt and reply:
+                        save_to_tamil_memory(clean_prompt, reply.strip())
 
 
 def start_echo_vision_loop():
@@ -216,12 +242,11 @@ def start_echo_vision_loop():
     voice = EchoVoiceInterface(language=SYSTEM_LANGUAGE, model_size="tiny")
     brain = EchoVisionAssistant(language=SYSTEM_LANGUAGE, model_name="qwen2.5:3b")
     
-    # Launch All Concurrent Workers
     threading.Thread(target=speech_playback_worker, args=(voice,), daemon=True).start()
     threading.Thread(target=always_on_microphone_worker, args=(voice, brain), daemon=True).start()
     threading.Thread(target=depth_vision_worker, args=(voice,), daemon=True).start()
     
-    startup_msg = "John is ready with 3D Vision. Monitoring environment." if SYSTEM_LANGUAGE == "en" else "3D பார்வையுடன் ஜான் தயார். கண்காணிக்கப்படுகிறது."
+    startup_msg = "ஜான் தயார். 3D பார்வை மற்றும் தமிழ் கற்றல் அமைப்பு செயலில் உள்ளது." if SYSTEM_LANGUAGE == "ta" else "John is ready with 3D Vision and Tamil Learning."
     speak_queue.put(startup_msg)
     
     last_known_person = None
@@ -248,9 +273,7 @@ def start_echo_vision_loop():
                         force_immediate_interrupt()
                         interrupt_event.clear()
                         
-                        greeting_msg = (f"Hello {current_person}, welcome back." 
-                                        if SYSTEM_LANGUAGE == "en" 
-                                        else f"வணக்கம் {current_person}, மீண்டும் வருக.")
+                        greeting_msg = f"வணக்கம் {current_person}, மீண்டும் வருக." if SYSTEM_LANGUAGE == "ta" else f"Hello {current_person}, welcome back."
                         speak_queue.put(greeting_msg)
                         
                         last_known_person = current_person
@@ -258,7 +281,7 @@ def start_echo_vision_loop():
                         unknown_start_time = None
                         has_prompted_for_current_unknown = False
                 
-                # --- 2. UNIDENTIFIED PERSON 1.5 MINUTE REGISTRATION ---
+                # --- 2. UNIDENTIFIED PERSON REGISTRATION ---
                 elif len(pending_list) > 0:
                     pending_node = pending_list[0]
                     pending_id = pending_node.get("id")
@@ -272,8 +295,7 @@ def start_echo_vision_loop():
                         unknown_start_time = time.time()
                         has_prompted_for_current_unknown = False
                     
-                    local_elapsed = time.time() - unknown_start_time if unknown_start_time else 0
-                    total_elapsed = max(local_elapsed, pi5_reported_age)
+                    total_elapsed = max((time.time() - unknown_start_time if unknown_start_time else 0), pi5_reported_age)
                     
                     if total_elapsed >= UNKNOWN_DELAY_SECONDS and not has_prompted_for_current_unknown:
                         has_prompted_for_current_unknown = True
@@ -281,48 +303,31 @@ def start_echo_vision_loop():
                         mic_pause_event.set()
                         force_immediate_interrupt()
                         
-                        prompt_msg = ("A new person is in front of you. Would you like to add this person?" 
-                                      if SYSTEM_LANGUAGE == "en" 
-                                      else "முன்னால் ஒரு புதிய நபர் உள்ளார். அவரை சேர்க்க வேண்டுமா?")
+                        prompt_msg = "முன்னால் ஒரு புதிய நபர் உள்ளார். அவரை சேர்க்க வேண்டுமா?" if SYSTEM_LANGUAGE == "ta" else "A new person is in front. Add them?"
                         voice.speak(prompt_msg)
                         
                         confirmation = voice.listen_for_keyword(timeout_seconds=5)
-                        parsed_ans = voice.parse_yes_no(confirmation)
-                        
-                        if parsed_ans == "YES":
-                            name_prompt = "What is their name?" if SYSTEM_LANGUAGE == "en" else "அவரது பெயர் என்ன?"
+                        if voice.parse_yes_no(confirmation) == "YES":
+                            name_prompt = "அவரது பெயர் என்ன?" if SYSTEM_LANGUAGE == "ta" else "What is their name?"
                             voice.speak(name_prompt)
                             
                             raw_name = voice.listen_for_keyword(timeout_seconds=5)
                             clean_name = raw_name.strip().replace(" ", "_") if raw_name else ""
                             
                             if clean_name:
-                                payload = {"pending_id": pending_id, "name": clean_name}
                                 try:
-                                    reg_res = requests.post(REGISTER_API_URL, json=payload, timeout=3.0)
-                                    if reg_res.status_code == 200:
-                                        success_msg = (f"{clean_name} has been added successfully." 
-                                                       if SYSTEM_LANGUAGE == "en" 
-                                                       else f"{clean_name} வெற்றிகரமாக சேர்க்கப்பட்டார்.")
-                                        voice.speak(success_msg)
-                                    else:
-                                        voice.speak("Server registration error.")
+                                    reg_res = requests.post(REGISTER_API_URL, json={"pending_id": pending_id, "name": clean_name}, timeout=3.0)
+                                    voice.speak(f"{clean_name} சேர்க்கப்பட்டார்." if SYSTEM_LANGUAGE == "ta" else f"{clean_name} added.")
                                 except requests.RequestException:
-                                    voice.speak("Connection error during registration.")
+                                    voice.speak("Connection error.")
                             else:
                                 requests.post(DECLINE_API_URL, json={"pending_id": pending_id}, timeout=2.0)
-                                cancel_msg = "No name heard. Registration cancelled." if SYSTEM_LANGUAGE == "en" else "ரத்து செய்யப்பட்டது."
-                                voice.speak(cancel_msg)
+                                voice.speak("ரத்து செய்யப்பட்டது." if SYSTEM_LANGUAGE == "ta" else "Cancelled.")
                         else:
-                            try:
-                                requests.post(DECLINE_API_URL, json={"pending_id": pending_id}, timeout=2.0)
-                            except requests.RequestException:
-                                pass
-                            decline_msg = "Person declined." if SYSTEM_LANGUAGE == "en" else "நிராகரிக்கப்பட்டது."
-                            voice.speak(decline_msg)
+                            requests.post(DECLINE_API_URL, json={"pending_id": pending_id}, timeout=2.0)
+                            voice.speak("நிராகரிக்கப்பட்டது." if SYSTEM_LANGUAGE == "ta" else "Declined.")
                         
                         mic_pause_event.clear()
-                
                 else:
                     last_processed_uid = None
                     unknown_start_time = None
